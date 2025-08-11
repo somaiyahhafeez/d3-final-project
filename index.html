@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<head>
+  <title>Mapping NYC’s Foreign-Born Communities and ICE Arrest Trends</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; color:#222; }
+    a { color: inherit; }
+    .container { max-width: 960px; margin: 0 auto; padding: 0 12px; }
+    .tooltip {
+      position: absolute; background: white; border: 1px solid #cfcfcf;
+      padding: 6px 8px; pointer-events: none; font-size: 13px;
+      box-shadow: 0 1px 6px rgba(0,0,0,.18);
+    }
+
+    /* Map */
+    .map-wrap svg { background: #ffffff; display: block; margin: 0 auto; width:100%; height:auto; }
+
+    /* ICE chart section */
+    #ice-chart-root { margin: 40px auto; max-width: 960px; padding: 0 12px; }
+    #ice-chart-root .title { font-size: 26px; font-weight: 600; max-width: 920px; margin-bottom: 6px; }
+    #ice-chart-root .subtitle { color:#444; font-size: 15px; margin-bottom: 20px; max-width: 920px; }
+    #ice-chart-root .legend { display:flex; gap:16px; margin-bottom:4px; align-items:center; flex-wrap:wrap; border:none; }
+    #ice-chart-root .legend-swatch { width:20px; height:3px; border-radius:2px; display:inline-block; }
+    #ice-chart-root svg { width:100%; height:auto; }
+    #ice-chart-root .axis text { fill:#444; font-size:12px; }
+    #ice-chart-root .axis line, #ice-chart-root .axis path { stroke:#ddd; }
+    #ice-chart-root .grid line { stroke:#eee; }
+    #ice-chart-root .footer { font-size:12px; color:#555; margin-top:8px; }
+    /* extra guard to ensure no axis border lines show */
+    #ice-chart-root .axis .domain { display: none; }
+  </style>
+</head>
+<body>
+
+  <!-- Page title -->
+  <header class="container" style="margin:22px auto 10px;">
+    <h1 style="margin:0 0 6px; font-size:34px; line-height:1.2; font-weight:800;">
+      Mapping NYC’s Foreign-Born Communities and ICE Arrest Trends
+    </h1>
+  </header>
+
+  <!-- Intro text BEFORE map -->
+  <div class="container" style="margin:12px auto 20px; font-size:16px; line-height:1.5; color:#333;">
+    While the debate plays out among experts, legislators and policy makers, the real world impact of the Trump administrations immigration crackdown is being felt across the many neighborhoods around New York City with large numbers of foreign-born people.
+    <br><br>
+    Note that there is no neighborhood-level data on illegal or undocumented immigrants (or those going through the legal immigration process), census data is the best proxy for where they are going.
+  </div>
+
+  <!-- Map headline and subhead (aligned) -->
+  <div class="container">
+    <h2 style="font-weight:700; font-size:20px; margin:14px 0 4px;">
+      About 40.5% of New York City’s foreign-born population is from Latin America.
+    </h2>
+    <p style="color:#333; font-size:16px; margin:0 0 14px;">
+      More than 40% of the city's total population is foreign-born.
+    </p>
+  </div>
+
+  <!-- NYC Map -->
+  <div class="container map-wrap">
+    <svg id="nyc-map" viewBox="0 0 780 640"></svg>
+  </div>
+  <div class="tooltip" style="display:none"></div>
+
+  <script>
+    // ===== NYC MAP =====
+    const vbW = 780, vbH = 640;
+    const padLeftRight = 12, padTop = 8, padBottom = 8;
+    const fmtPct = d3.format(".1f");
+
+    const svgMap = d3.select("#nyc-map");
+    const tooltip = d3.select(".tooltip");
+
+    Promise.all([
+      d3.json("nynta2020.json"),
+      d3.csv("Foreign-born-per-subregion-per-NTA.csv")
+    ]).then(([geoData, csvData]) => {
+      const pctCols = Object.keys(csvData[0]).filter(k => k.endsWith('_pct') && k.includes('::'));
+      const colToName = k => k.replace(/_pct$/, "").split("::").slice(-1)[0];
+      const dataMap = new Map(csvData.map(d => [d.NTAName, d]));
+
+      function getTopSubregions(props, n = 2) {
+        return pctCols.map(k => ({ name: colToName(k), pct: +props[k] }))
+          .filter(d => Number.isFinite(d.pct) && d.pct > 0)
+          .sort((a,b) => b.pct - a.pct)
+          .slice(0, n);
+      }
+      const getTop1 = props => getTopSubregions(props, 1)[0];
+
+      geoData.features.forEach(f => {
+        const row = dataMap.get(f.properties.NTAName);
+        if (row) Object.assign(f.properties, row);
+      });
+
+      const used = new Set();
+      geoData.features.forEach(f => {
+        const row = dataMap.get(f.properties.NTAName);
+        if (!row) return;
+        const top = getTop1(row);
+        if (top) used.add(top.name);
+      });
+      const domain = Array.from(used).sort(d3.ascending);
+
+      const customColors = {
+        "Latin America": "#25486d",
+        "Eastern Asia": "#8DA750",
+        "Eastern Europe": "#ded1b4",
+        "Northern Europe": "#8d021f",
+        "South Central Asia": "#d24e01",
+        "Southern Africa": "#fab102",
+        "Western Asia": "#3b1344",
+        "Western Europe": "#05696B"
+      };
+      const hueScale = d3.scaleOrdinal()
+        .domain(domain)
+        .range(domain.map(name => customColors[name] || "#ccc"));
+
+      const sq = 14, labelFont = 14, rowGap = 6, labelPadX = 8;
+      const legend = svgMap.append("g").attr("class", "legend");
+      let yOffset = 0;
+      domain.forEach(name => {
+        const g = legend.append("g").attr("transform", `translate(0,${yOffset})`);
+        g.append("rect").attr("width", sq).attr("height", sq).attr("fill", hueScale(name));
+        g.append("text")
+          .attr("x", sq + labelPadX).attr("y", sq / 2)
+          .attr("dominant-baseline", "middle")
+          .style("font-size", `${labelFont}px`)
+          .text(name);
+        yOffset += sq + rowGap;
+      });
+
+      const mapLeft   = padLeftRight;
+      const mapTop    = padTop;
+      const mapRight  = vbW - padLeftRight;
+      const mapBottom = vbH - padBottom;
+
+      const projection = d3.geoIdentity().reflectY(true);
+      projection.fitExtent([[mapLeft, mapTop], [mapRight, mapBottom]], geoData);
+      const path = d3.geoPath().projection(projection);
+
+      legend.attr("transform", `translate(${mapLeft + 10}, ${mapTop + 10})`);
+
+      svgMap.append("g")
+        .selectAll("path")
+        .data(geoData.features)
+        .join("path")
+        .attr("d", d => path(d))
+        .attr("fill", d => {
+          const row = dataMap.get(d.properties.NTAName);
+          if (!row) return "#eee";
+          const top = getTop1(row);
+          return top ? hueScale(top.name) : "#eee";
+        })
+        .attr("stroke", "#ffffff")
+        .attr("stroke-width", 1.0)
+        .on("mouseover", function(event, d) {
+          const name = d.properties.NTAName || "";
+          const row  = dataMap.get(name);
+          let html = `<strong>${name}</strong>`;
+          if (row) {
+            const top2 = getTopSubregions(row, 2);
+            if (top2.length) {
+              const lines = top2.map(x => `${x.name}: ${fmtPct(x.pct)}%`).join("<br>");
+              html += `<br>${lines}`;
+            }
+          } else {
+            html += `<br><em>No data</em>`;
+          }
+          d3.select(this).attr("stroke-width", 1.8);
+          tooltip.style("display", "block").html(html);
+        })
+        .on("mousemove", function(event) {
+          if (tooltip.style("display") !== "none") {
+            tooltip.style("left", (event.pageX + 10) + "px")
+                   .style("top",  (event.pageY + 10) + "px");
+          }
+        })
+        .on("mouseout", function() {
+          d3.select(this).attr("stroke-width", 1.0);
+          tooltip.style("display", "none");
+        });
+    });
+  </script>
+
+  <!-- Text BETWEEN map and chart -->
+  <div class="container" style="margin:20px auto; font-size:16px; line-height:1.5; color:#333;">
+    New federal data, obtained by a group of academics and lawyers through FOIA requests, shows that as of 26th June, a total of 2494 arrests have been made in the New York city area. More than 1200 of these arrests were made outside the immigration court in Federal Plaza.
+    <br><br>
+    Data obtained by the Deportation Data Project shows that 54% of the detained immigrants in New York City have no criminal convictions and 16% have pending charges against them.
+  </div>
+
+  <!-- ICE ARRESTS CHART -->
+  <section id="ice-chart-root">
+    <div class="title">
+      ICE arrested more than 700 people with no criminal record in New York City and surrounding areas in June
+    </div>
+    <div class="subtitle">
+      The Trump administration has repeatedly claimed it is going after the "worst of the worst" and "dangerous criminals" but data tells otherwise.
+    </div>
+
+    <div class="legend">
+      <span><span class="legend-swatch" style="background:#111"></span> Criminal Charges</span>
+      <span><span class="legend-swatch" style="background:#777"></span> Pending Charges</span>
+      <span><span class="legend-swatch" style="background:#e31a1c"></span> No Criminal Charges</span>
+    </div>
+
+    <svg id="ice-chart" width="960" height="520" viewBox="0 0 960 520" preserveAspectRatio="xMidYMid meet"></svg>
+
+    <div class="footer">
+      <em>Seven day rolling average. Data till 26th June.</em><br>
+      Chart: Somaiyah Hafeez • Source: <a href="https://trac.syr.edu/immigration/" target="_blank" rel="noopener">The Deportation Data Project</a>
+    </div>
+  </section>
+
+  <script>
+    // ===== ICE CHART ===== (no tooltip; exact ticks; no axis border line)
+    (async function () {
+      const data = await d3.csv("per_criminality.csv", d3.autoType);
+      const parseISO = d3.timeParse("%Y-%m-%d");
+      data.forEach(d => {
+        const raw = d["Arrest Date"];
+        d.date = raw instanceof Date ? raw : parseISO(String(raw).slice(0,10));
+        d.criminal_charges_rolled     = +d["1 Convicted Criminal (7-day avg)"];
+        d.pending_charges_rolled      = +d["2 Pending Criminal Charges (7-day avg)"];
+        d.no_criminal_charges_rolled  = +d["3 Other Immigration Violator (7-day avg)"];
+      });
+
+      const svg = d3.select("#ice-chart");
+      const margin = {top: 10, right: 30, bottom: 42, left: 50};
+      const width  = 960 - margin.left - margin.right;
+      const height = 520 - margin.top - margin.bottom;
+      const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+      const x = d3.scaleUtc()
+        .domain(d3.extent(data, d => d.date))
+        .range([0, width]);
+
+      const rawMax = d3.max([
+        d3.max(data, d => d.criminal_charges_rolled),
+        d3.max(data, d => d.pending_charges_rolled),
+        d3.max(data, d => d.no_criminal_charges_rolled)
+      ]);
+      const yTop = Math.max(40, Math.ceil(rawMax || 0)) + 1;
+      const y = d3.scaleLinear().domain([0, yTop]).range([height, 0]);
+
+      g.append("g")
+        .attr("class", "grid")
+        .call(d3.axisLeft(y).tickValues(d3.range(0, 41, 5)).tickSize(-width).tickFormat(""));
+
+      const dwTicks = [
+        new Date(Date.UTC(2024, 6, 1)),
+        new Date(Date.UTC(2024, 9, 1)),
+        new Date(Date.UTC(2025, 0, 1)),
+        new Date(Date.UTC(2025, 3, 1)),
+      ].filter(d => x.domain()[0] <= d && d <= x.domain()[1]);
+
+      const xAxis = d3.axisBottom(x)
+        .tickValues(dwTicks)
+        .tickFormat(d3.utcFormat("%B %-d, %Y"))
+        .tickSizeOuter(0);
+
+      g.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(0,${height})`)
+        .call(xAxis)
+        .call(g => g.select(".domain").remove());   // remove the horizontal border line
+
+      g.append("g")
+        .attr("class", "axis")
+        .call(d3.axisLeft(y).tickValues(d3.range(0, 41, 5)).tickSizeOuter(0))
+        .call(g => g.select(".domain").remove());   // remove left border too, for consistency
+
+      const line = d3.line()
+        .defined(d => Number.isFinite(d.value))
+        .x(d => x(d.date))
+        .y(d => y(d.value));
+
+      [
+        { key: "criminal_charges_rolled",    color: "#111"   },
+        { key: "pending_charges_rolled",     color: "#777"   },
+        { key: "no_criminal_charges_rolled", color: "#e31a1c"}
+      ].forEach(s => {
+        const values = data.map(d => ({date: d.date, value: +d[s.key]}));
+        g.append("path")
+          .datum(values)
+          .attr("fill", "none")
+          .attr("stroke", s.color)
+          .attr("stroke-width", 2)
+          .attr("d", line);
+      });
+    })();
+  </script>
+
+  <!-- Text AFTER chart -->
+  <div class="container" style="margin:20px auto; font-size:16px; line-height:1.5; color:#333;">
+    Tricia McLaughlin, the Assistant Secretary for Public Affairs at the Department of Homeland Security, said the “data is being cherry picked by the Deportation Data Project to peddle a false narrative”, asserting that “70% of the arrests ICE has made are criminal illegal aliens.”
+    <br><br>
+    “Many of the individuals that are counted as ‘non-criminals’ are actually terrorists, human rights abusers, gangsters and more; they just don’t have a rap sheet in the U.S. Further, every single one of these individuals committed a crime when they came into this country illegally.  It is not an accurate description to say they are 'non-criminals.'”, McLaughlin said in an email interview.
+  </div>
+
+</body>
+</html>
